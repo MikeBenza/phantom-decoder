@@ -6,6 +6,8 @@ import datetime
 import time
 import os
 import sys
+import traceback
+import keys
 
 old_ord = ord
 def ord(x):
@@ -93,7 +95,7 @@ class ControllerFrame(Frame):
     def __init__(self, raw_frame):
         super(ControllerFrame, self).__init__(raw_frame)
 
-        aileron, elevator, throttle, rudder, _, _, _, _, _ = struct.unpack_from("<HHHHHBBBB", self.body, 0)
+        aileron, elevator, throttle, rudder, _, _, _, _ = struct.unpack_from("<HHHHBBBB", self.body, 0)
 
         self.aileron = aileron / 1024.0 - 1
         self.elevator = elevator / 1024.0 - 1
@@ -261,11 +263,10 @@ class AircraftFrame(Frame):
         controller_serial_no, \
         battery_serial_no, \
             = struct.unpack_from("<BBBBB10s32sQ10s10s10s", self.body)
-
         self.app_version = [app_version_1, app_version_2, app_version_3]
         self.aircraft_serial_no = str(aircraft_serial_no)
         self.aircraft_name = str(aircraft_name).replace("\0","")
-        self.active_timestamp = time.ctime(active_timestamp)
+        self.active_timestamp = time.ctime(swap_endianness(active_timestamp))
         self.camera_serial_no = str(camera_serial_no)
         self.controller_serial_no = str(controller_serial_no)
         self.battery_serial_no = str(battery_serial_no)
@@ -307,9 +308,25 @@ class EmptyFrame(Frame):
     def __repr__(self):
         return "<EmptyFrame>"
 
-def decode_buffer(f):
-    body = f['body']
+def swap_endianness(v):
+    bytes = struct.pack("Q", v)
+    v2, = struct.unpack("Q", bytes[::-1])
+    return v2
 
+def decode_frame(f):
+    if f['type'] >= 16:
+        return f
+    body = [x for x in f['body'][1:-1]]
+    key = get_key(f)
+
+    for i in range(len(body)):
+        body[i] = body[i] ^ key[i % len(key)]
+    f['body'] = bytes(body)
+    return f
+
+def get_key(f):
+    key_index = ((f['type'] - 1) * 256) + f['body'][0]
+    return keys.keys[key_index]
 
 def decode_file(path):
 
@@ -323,48 +340,53 @@ def decode_file(path):
 
     i = 0
     while i < len(body):
-        frame_type = ord(body[i])
-        frame_size = ord(body[i+1])
-        frame_end = i+2+frame_size
-        frame_body = body[i+2:frame_end]
-        trailer = body[frame_end]
-        if trailer != 0xff:
-            # Probably the end of the file. Don't understand the final chunk yet.
-            break
+        try:
+            frame_type = ord(body[i])
+            frame_size = ord(body[i+1])
+            frame_end = i+2+frame_size
+            frame_body = body[i+2:frame_end]
+            trailer = body[frame_end]
+            if trailer != 0xff:
+                # Probably the end of the file. Don't understand the final chunk yet.
+                break
 
-        i+= frame_size+3
+            i+= frame_size+3
 
-        f = {
-            "type": frame_type,
-            "body": frame_body
-        }
+            f = {
+                "type": frame_type,
+                "body": frame_body
+            }
+            f = decode_frame(f)
 
-        if frame_type == 1:
-            frames.append(PositionFrame(f))
-        elif frame_type == 5:
-            frames.append(TimeFrame(f))
-        elif frame_type == 4:
-            frames.append(ControllerFrame(f))
-        elif frame_type == 3:
-            frames.append(GimbalFrame(f))
-        elif frame_type == 2:
-            frames.append(HomeFrame(f))
-        elif frame_type == 6:
-            frames.append(Frame6(f))
-        elif frame_type == 7:
-            frames.append(BatteryFrame(f))
-        elif frame_type == 8:
-            frames.append(SmartBatteryFrame(f))
-        elif frame_type == 9:
-            frames.append(MessageFrame(f))
-        elif frame_type == 11:
-            frames.append(Frame11(f))
-        elif frame_type == 13:
-            frames.append(AircraftFrame(f))
-        elif frame_type == 15:
-            frames.append(Frame15(f))
-        else:
-            frames.append(UnknownFrame(f))
+            if frame_type == 1:
+                frames.append((frame_type, PositionFrame(f)))
+            elif frame_type == 5:
+                frames.append((frame_type, TimeFrame(f)))
+            elif frame_type == 4:
+                frames.append((frame_type, ControllerFrame(f)))
+            elif frame_type == 3:
+                frames.append((frame_type, GimbalFrame(f)))
+            elif frame_type == 2:
+                frames.append((frame_type, HomeFrame(f)))
+            elif frame_type == 6:
+                frames.append((frame_type, Frame6(f)))
+            elif frame_type == 7:
+                frames.append((frame_type, BatteryFrame(f)))
+            elif frame_type == 8:
+                frames.append((frame_type, SmartBatteryFrame(f)))
+            elif frame_type == 9:
+                frames.append((frame_type, MessageFrame(f)))
+            elif frame_type == 11:
+                frames.append((frame_type, Frame11(f)))
+            elif frame_type == 13:
+                frames.append((frame_type, AircraftFrame(f)))
+            elif frame_type == 15:
+                frames.append((frame_type, Frame15(f)))
+            else:
+                frames.append((frame_type, UnknownFrame(f)))
+        except:
+            traceback.print_exc()
+
 
 
     print("Parsed %d frames" % len(frames))
